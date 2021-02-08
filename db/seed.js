@@ -1,72 +1,9 @@
-const execSync = require('child_process').execSync
-const glob = require('glob')
+const schema = require('./schema.js')
+const connection = require('./connection')
 const fs = require('fs')
 
-const txtPath = './data/2020q3'
-
-const dumpFile = 'valueDump.sql'
-const dumpArchive = 'valueDump.gz'
 const database = 'value'
-
-function genTables() {
-  const dataFolder = './data'
-  const dataDir = fs.readdirSync(dataFolder)
-  const tableSql = fs.readFileSync('./db/value.sql', 'utf-8')
-  const dirNames = dataDir.filter(file => fs.lstatSync(`${dataFolder}/${file}`).isDirectory())
-  console.log(dirNames)
-
-  const tableNames = [
-    'subs',
-    'tags',
-    'nums',
-    'pres'
-  ]
-
-  for (const dirName of dirNames) {
-    let tableSqlYear = tableSql
-    for (const tableName of tableNames) {
-      const re = new RegExp(tableName, "g")
-      tableSqlYear = tableSqlYear.replace(re, `${dirName}_${tableName}`)
-      console.log(tableName)
-    }
-    console.log(dirName)
-    fs.writeFileSync(`./db/${dirName}.sql`, tableSqlYear)
-  }
-}
-
-function restoreSchema() {
-  genTables()
-  const schemaFiles = glob.sync('./db/*.sql')
-  console.log(schemaFiles)
-  for (const schemaFile of schemaFiles) {
-    const schemaCommand = `mysql -u root < ${schemaFile}`
-    console.log(schemaCommand)
-    execSync(schemaCommand)
-  }
-}
-
-restoreSchema()
-
-async function createDump() {
-  const dumpCommand = `mysqldump -u root --no-create-info --no-create-db ${database} > ${dumpFile}`
-  const archiveCommand = `tar -cvzf ${dumpArchive} ${dumpFile} > /dev/null 2>&1`
-
-  console.log(dumpCommand)
-  execSync(dumpCommand)
-  console.log(archiveCommand)
-  execSync(archiveCommand)
-}
-
-async function restoreDump() {
-  const unarchiveCommand = `tar -xvzf ${dumpArchive} > /dev/null 2>&1`
-  const restoreCommand = `mysql -u root ${database} < ${dumpFile}`
-  if (fs.existsSync(`${dumpArchive}`)) {
-    console.log(unarchiveCommand)
-    execSync(unarchiveCommand)
-    console.log(restoreCommand)
-    execSync(restoreCommand)
-  }
-}
+const dataFolder = './data'
 
 // Set numRecords to undefined to seed all records
 const seedDb = [
@@ -76,60 +13,96 @@ const seedDb = [
       'baph','countryma','stprma','cityma','zipma','mas1','mas2','countryinc','stprinc','ein',
       'former','changed','afs','wksi','fye','form','period','fy','fp','filed','accepted','prevrpt','detail','instance','nciks','aciks'],
     fileName: 'sub.txt',
-    tableName: 'sub',
-    numRecords: undefined
-  }, {
-    seed: true,
-    headers : ['tag','version','custom','abstract','datatype','iord','crdr','tlabel','doc'],
-    fileName: 'tag.txt',
-    tableName: 'tag',
+    tableSuffix: 'subs',
     numRecords: undefined
   }, {
     seed: false,
+    headers : ['tag','version','custom','abstract','datatype','iord','crdr','tlabel','doc'],
+    fileName: 'tag.txt',
+    tableSuffix: 'tags',
+    numRecords: undefined
+  }, {
+    seed: true,
     headers : ['adsh', 'tag', 'version', 'coreg', 'ddate', 'qtrs', 'uom', 'value', 'footnote'],
     fileName: 'num.txt',
-    tableName: 'num',
+    tableSuffix: 'nums',
     numRecords: undefined
   }, {
     seed: false,
     headers : ['adsh','report','line','stmt','inpth','rfile','tag','version','plabel','negating'],
     fileName: 'pre.txt',
-    tableName: 'pre',
+    tableSuffix: 'pres',
     numRecords: undefined
   }
 ]
 
-async function seedRecords(knex) {
-  for (const seedData of seedDb) {
-    // if (seedData.seed === false) { continue }
-    const file = fs.readFileSync( `${txtPath}/${seedData.fileName}`, 'utf-8')
-    const splitText = file.split('\n')
+async function seedRecords() {
+  schema.restoreSchema()
+  const knex = await connection.getConnection()
+  console.log("max pool below!")
+  console.log(knex.client.pool.max)
 
-    let records = []
-    const recordLimit = seedData.numRecords ? seedData.numRecords : splitText.length - 2
-    for (let i = 1; i <= recordLimit; ++i) {
-      const splitLine = splitText[i].split('\t')
-      record = {}
+  // return
+  const before = Date.now()
+  let quarterlyDataFolderNames = schema.getQuarterlyDataFolderNames()
+  // only one quarter right now
+  quarterlyDataFolderNames = [quarterlyDataFolderNames[0]]
 
-      for (const [index, header] of seedData.headers.entries()) {
-        record[header] = splitLine[index].toString() ? splitLine[index] : null
-      }
-      records.push(record)
-      // console.log(record)
-      if (records.length % 500 == 0 || i == recordLimit) {
-        console.log(i)
-        try {
-          await knex(seedData.tableName).insert(records)
-        } catch (err) {
-          console.log(err)
+  for (const quarterlyDataFolderName of quarterlyDataFolderNames) {
+    for (const seedData of seedDb) {
+      if (!seedData.seed) { continue }
+
+      console.log("Seeding data below!")
+      console.log(seedData)
+      // if (seedData.seed === false) { continue }
+      const file = fs.readFileSync(`${dataFolder}/${quarterlyDataFolderName}/${seedData.fileName}`, 'utf-8')
+      const splitText = file.split('\n')
+
+      let records = []
+      let parr = []
+      const recordLimit = seedData.numRecords ? seedData.numRecords : splitText.length - 2
+      for (let i = 1; i <= recordLimit; ++i) {
+        const splitLine = splitText[i].split('\t')
+        record = {}
+
+        for (const [index, header] of seedData.headers.entries()) {
+          record[header] = splitLine[index].toString() ? splitLine[index] : null
         }
-        records = []
+        records.push(record)
+        if (records.length % 200 == 0 || i == recordLimit) {
+          if (i === recordLimit) {
+            console.log("WE HIT THE RECORD LIMIT")
+          }
+          console.log(i)
+          try {
+            const insertPromise = knex(`${quarterlyDataFolderName}_${seedData.tableSuffix}`).insert(records)
+            parr.push(insertPromise)
+            // await insertPromise
+          } catch (err) {
+            console.log(err)
+          }
+          records = []
+        }
+        if (parr.length === 10) {
+          console.log("we hit parr 10! clearing out parr")
+          await Promise.all(parr)
+          parr = []
+        }
       }
+      // 2890146
+      // Time in seconds: 60.648
+
+      // Single 2019q1 num records with await in batches of 500
+      // Time in seconds: 119.853
+      await Promise.all(parr)
     }
   }
+  const after = Date.now()
+  console.log(`Time in seconds: ${(after-before)/1000}`)
+  await knex.destroy()
 }
 
-module.exports.restoreSchema = restoreSchema
+seedRecords()
+
 module.exports.seedRecords = seedRecords
-module.exports.createDump = createDump
-module.exports.restoreDump = restoreDump
+

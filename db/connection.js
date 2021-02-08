@@ -7,8 +7,6 @@ const host = '127.0.0.1'
 
 let knex
 async function getConnection(host = '127.0.0.1', user = 'root', password = '', database = 'value') {
-  console.log('wtf!')
-  console.log(user)
   const connection = {
     host,
     user,
